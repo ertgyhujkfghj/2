@@ -10,7 +10,7 @@ if (Test-Path $logPath) {
     $logFile = Get-Item $logPath
     if ($logFile.LastWriteTime -lt (Get-Date).AddDays(-30)) {
         Remove-Item $logPath -Force -ErrorAction SilentlyContinue
-        Log "🧹 已清理过期日志"
+        Log "🪑 已清理过期日志"
     }
 }
 
@@ -198,4 +198,4 @@ if (-not $uploadSuccess) {
 Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
 Log "✅ 清理完毕，执行结束"
-Log "============== End ==============`n"
+Log "============== End ==============\n"
