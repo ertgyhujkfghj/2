@@ -1,12 +1,12 @@
-# uploader.ps1 - 带远程开关的 GitHub 上传脚本
+# uploader.ps1 - 带远程开关的 GitHub 上传脚本（使用 GH_TOKEN 环境变量）
 
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 $OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 
 $repo = "ertgyhujkfghj/2"
-$token = $env:GITHUB_TOKEN
+$token = $env:GH_TOKEN
 if (-not $token) {
-    Write-Host "❌ GITHUB_TOKEN 未设置，脚本终止。"
+    Write-Host "❌ GH_TOKEN 环境变量未设置，脚本终止。"
     exit 1
 }
 
@@ -34,7 +34,7 @@ try {
     exit 1
 }
 
-# 准备文件压缩目录
+# 准备工作目录
 $tag = "$env:COMPUTERNAME-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 $workDir = "$env:TEMP\backup_$tag"
 New-Item -ItemType Directory -Path $workDir -Force | Out-Null
