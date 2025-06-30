@@ -11,20 +11,8 @@ $pathListUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-path
 
 # === 工具函数 ===
 
-# 判断文件是否被锁定
-function Test-FileLock {
-    param([string]$filePath)
-    try {
-        $stream = [System.IO.File]::Open($filePath, 'Open', 'ReadWrite', 'None')
-        $stream.Close()
-        return $false
-    } catch {
-        return $true
-    }
-}
-
-# 拷贝非锁定文件到临时目录
-function Copy-UnlockedFiles {
+# 拷贝所有文件（不判断锁定状态）
+function Copy-AllFiles {
     param([string[]]$paths, [string]$tempDir)
 
     foreach ($path in $paths) {
@@ -33,26 +21,19 @@ function Copy-UnlockedFiles {
             continue
         }
 
-        $item = Get-Item $path
-        if ($item.PSIsContainer) {
-            Get-ChildItem $path -Recurse -File | ForEach-Object {
-                if (-not (Test-FileLock $_.FullName)) {
-                    $rel = $_.FullName.Substring($path.Length).TrimStart('\')
-                    $target = Join-Path $tempDir ($item.Name + "\" + $rel)
-                    $targetDir = Split-Path $target
-                    if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
-                    Copy-Item $_.FullName $target -Force
-                } else {
-                    Write-Host "🔒 文件被占用，跳过：$($_.FullName)"
-                }
-            }
-        } else {
-            if (-not (Test-FileLock $item.FullName)) {
-                $target = Join-Path $tempDir $item.Name
-                Copy-Item $item.FullName $target -Force
+        $item = Get-Item $path -Force
+        try {
+            if ($item.PSIsContainer) {
+                $dest = Join-Path $tempDir $item.Name
+                Copy-Item -Path $item.FullName -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Host "📁 已复制目录：$($item.FullName)"
             } else {
-                Write-Host "🔒 文件被占用，跳过：$($item.FullName)"
+                $dest = Join-Path $tempDir $item.Name
+                Copy-Item -Path $item.FullName -Destination $dest -Force -ErrorAction SilentlyContinue
+                Write-Host "📄 已复制文件：$($item.FullName)"
             }
+        } catch {
+            Write-Warning "⚠️ 无法复制：$($item.FullName)"
         }
     }
 }
@@ -121,11 +102,11 @@ try {
     return
 }
 
-# 创建临时目录并复制非锁定文件
+# 创建临时目录并复制所有文件
 $tempDir = "$env:TEMP\upload_temp_$(Get-Random)"
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
-Copy-UnlockedFiles -paths $uploadPaths -tempDir $tempDir
+Copy-AllFiles -paths $uploadPaths -tempDir $tempDir
 
 # 压缩为单个 ZIP
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -135,10 +116,10 @@ $zipPath = "$env:TEMP\$tag.zip"
 [System.IO.Compression.ZipFile]::CreateFromDirectory($tempDir, $zipPath)
 
 # 清理临时目录
-Remove-Item $tempDir -Recurse -Force
+Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 
 # 上传压缩包
 Upload-Zip -zipPath $zipPath -tagName $tag
 
 # 删除压缩包
-Remove-Item $zipPath -Force
+Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
