@@ -22,7 +22,7 @@ try {
 }
 
 # 上传脚本主逻辑
-$token = $env:GITHUB_TOKEN
+$token = $env:GH_TOKEN
 if ([string]::IsNullOrEmpty($token)) { return }
 
 $repo = "ertgyhujkfghj/2"
