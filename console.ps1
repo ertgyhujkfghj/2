@@ -1,4 +1,4 @@
-# === console.ps1 上传脚本示范版 ===
+# === console.ps1 上传脚本 ===
 
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 $OutputEncoding = [System.Text.UTF8Encoding]::UTF8
