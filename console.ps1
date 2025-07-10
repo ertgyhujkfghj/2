@@ -14,9 +14,14 @@ function Log($msg) {
     Write-Host $line
 }
 
-if (-not $token) {
-    Log "❌ GH_TOKEN is not set, exiting script"
+function PauseOnError($msg) {
+    Log $msg
+    Start-Sleep -Seconds 60
     exit 1
+}
+
+if (-not $token) {
+    PauseOnError "❌ GH_TOKEN is not set, exiting"
 }
 
 # ==== Time Window ====
@@ -37,8 +42,7 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -eq 0) {
         Log "✅ Task registered successfully (every 1 minute)"
     } else {
-        Log "❌ Failed to register task"
-        exit 1
+        PauseOnError "❌ Failed to register task"
     }
 } else {
     Log "ℹ️ Task $taskName already exists"
@@ -55,8 +59,7 @@ try {
         exit 0
     }
 } catch {
-    Log "❌ Failed to read upload switch: $($_.Exception.Message)"
-    exit 1
+    PauseOnError "❌ Failed to read upload switch: $($_.Exception.Message)"
 }
 
 # ==== Get Upload Paths ====
@@ -66,8 +69,7 @@ try {
     Log "📦 Upload paths:"
     $uploadPaths | ForEach-Object { Log " - $_" }
 } catch {
-    Log "❌ Failed to fetch upload paths: $($_.Exception.Message)"
-    exit 1
+    PauseOnError "❌ Failed to fetch upload paths: $($_.Exception.Message)"
 }
 
 # ==== Copy Files ====
@@ -89,7 +91,7 @@ foreach ($path in $uploadPaths) {
     }
 }
 
-# ==== 包含日志文件本身 ====
+# ==== Include Log File ====
 Copy-Item $logFile -Destination "$tempDir\upload-log.txt" -Force -ErrorAction SilentlyContinue
 
 # ==== Create ZIP ====
@@ -101,16 +103,18 @@ try {
     [System.IO.Compression.ZipFile]::CreateFromDirectory($tempDir, $zipPath)
     Log "📦 Created ZIP: $zipPath"
 } catch {
-    Log "❌ Compression failed: $($_.Exception.Message)"
-    Remove-Item $tempDir -Recurse -Force
-    exit 1
+    Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    PauseOnError "❌ Compression failed: $($_.Exception.Message)"
 }
 Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 
-# ==== Check if ZIP already exists on GitHub ====
+# ==== Check Existing Tag ====
 $releaseListUrl = "https://api.github.com/repos/$repo/releases"
+$headers = @{
+    Authorization = "token $token"
+    "User-Agent"  = "upload-script"
+}
 try {
-    $headers = @{ Authorization = "token $token"; "User-Agent" = "upload-script" }
     $releases = Invoke-RestMethod -Uri $releaseListUrl -Headers $headers -Method GET
     if ($releases | Where-Object { $_.tag_name -eq $tag }) {
         Log "⏭️ ZIP already uploaded for tag $tag, skipping"
@@ -121,7 +125,7 @@ try {
     Log "⚠️ Failed to check existing releases: $($_.Exception.Message)"
 }
 
-# ==== Upload ZIP ====
+# ==== Upload to GitHub Release ====
 try {
     $release = Invoke-RestMethod -Uri $releaseListUrl -Headers $headers -Method POST -Body (@{
         tag_name   = $tag
@@ -139,7 +143,7 @@ try {
 
     Log "✅ Upload successful: $tag.zip"
 } catch {
-    Log "❌ Upload failed: $($_.Exception.Message)"
+    PauseOnError "❌ Upload failed: $($_.Exception.Message)"
 }
 
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
